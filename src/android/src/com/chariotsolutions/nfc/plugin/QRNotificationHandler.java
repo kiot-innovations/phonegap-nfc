@@ -42,9 +42,9 @@ import com.onesignal.notifications.INotificationReceivedEvent;
 import com.onesignal.notifications.INotificationServiceExtension;
 
 import com.chariotsolutions.nfc.plugin.IncomingCallActivity;
-import com.onesignal.notifications.internal.NotificationReceivedEvent;
 
-import java.math.BigInteger;
+import java.util.Timer;
+import java.util.TimerTask;
 
 public class QRNotificationHandler extends BroadcastReceiver implements INotificationServiceExtension{
 
@@ -167,12 +167,12 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
                             notificationManager.cancel(notification.getAndroidNotificationId());
                             Timer t1 = new Timer();
                             t1.schedule(new TimerTask() {
-                                           @Override
-                                           public void run() {
-                                               notificationManager.notify(NOTIFICATION_ID, newNotification);
-                                               t1.cancel();
-                                           }
-                                       },100);
+                                @Override
+                                public void run() {
+                                    notificationManager.notify(NOTIFICATION_ID, newNotification);
+                                    t1.cancel();
+                                }
+                            },100);
                             t.cancel();
                         }
                     }, 250);
