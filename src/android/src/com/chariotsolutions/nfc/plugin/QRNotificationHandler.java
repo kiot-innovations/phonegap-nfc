@@ -156,12 +156,26 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
                     notifBuilder.addAction(android.R.drawable.sym_action_call, "Answer", answerIntent);
 //                }
                     Notification newNotification = notifBuilder.build();
-                    notificationManager.cancel(notification.getAndroidNotificationId());
                     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
                         newNotification.flags |= Notification.FLAG_INSISTENT;
                     }
 
-                    notificationManager.notify(NOTIFICATION_ID, newNotification);
+                    Timer t = new Timer();
+                    t.schedule(new TimerTask() {
+                        @Override
+                        public void run() {
+                            notificationManager.cancel(notification.getAndroidNotificationId());
+                            Timer t1 = new Timer();
+                            t1.schedule(new TimerTask() {
+                                           @Override
+                                           public void run() {
+                                               notificationManager.notify(NOTIFICATION_ID, newNotification);
+                                               t1.cancel();
+                                           }
+                                       },100);
+                            t.cancel();
+                        }
+                    }, 250);
 
 //                startForeground(202, newNotification);
 //                notificationReceivedEvent.complete();
