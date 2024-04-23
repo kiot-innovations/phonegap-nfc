@@ -405,8 +405,11 @@
             [tag writeNDEF: self.messageToWrite completionHandler:^(NSError * _Nullable error) {
                 if (error) {
                     NSLog(@"%@", error);
+                    CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Invalid NDEF Message"];
+                    [self.commandDelegate sendPluginResult:pluginResult callbackId:self->sessionCallbackId];
                     [self closeSession:session withError:@"Write failed."];
                 } else {
+                    NSLog(@"Wrote Data to NFC Tag");
                     session.alertMessage = @"Wrote data to NFC tag.";
                     CDVPluginResult *pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
                     [self.commandDelegate sendPluginResult:pluginResult callbackId:self->sessionCallbackId];

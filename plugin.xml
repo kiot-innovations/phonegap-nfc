@@ -3,7 +3,7 @@
     xmlns="http://www.phonegap.com/ns/plugins/1.0"
     xmlns:android="http://schemas.android.com/apk/res/android"
     id="kiot-phonegap-nfc"
-    version="2.0.0">
+    version="2.0.2">
 
     <name>NFC</name>
 
@@ -127,7 +127,7 @@
         </config-file>
     </platform>
 
-    <!-- <platform name="ios">
+    <platform name="ios">
         <js-module src="www/phonegap-nfc.js" name="NFC">
             <runs />
         </js-module>
@@ -160,7 +160,7 @@
         <config-file target="*-Info.plist" parent="NFCReaderUsageDescription">
             <string>$NFC_USAGE_DESCRIPTION</string>
         </config-file>
-    </platform> -->
+    </platform>
 
 
 </plugin>
