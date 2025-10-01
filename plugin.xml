@@ -137,29 +137,11 @@
                 <param name="ios-package" value="NfcPlugin" />
             </feature>
         </config-file>
-
-        <config-file parent="com.apple.developer.nfc.readersession.formats" platform="ios" target="*-Debug.plist">
-            <array>
-                <string>NDEF</string>
-                <string>TAG</string>  
-            </array>
-        </config-file>
-        <config-file parent="com.apple.developer.nfc.readersession.formats" platform="ios" target="*-Release.plist">
-            <array>
-                <string>NDEF</string>
-                <string>TAG</string>  
-            </array>
-        </config-file>
         
         <header-file src="src/ios/NfcPlugin.h" />
         <source-file src="src/ios/NfcPlugin.m" />
         
         <framework src="CoreNFC.framework" weak="true" />
-
-        <preference name="NFC_USAGE_DESCRIPTION" default="Read NFC Tags" />
-        <config-file target="*-Info.plist" parent="NFCReaderUsageDescription">
-            <string>$NFC_USAGE_DESCRIPTION</string>
-        </config-file>
     </platform>
 
 
