@@ -48,6 +48,12 @@ import java.util.TimerTask;
 
 public class QRNotificationHandler extends BroadcastReceiver implements INotificationServiceExtension{
 
+    // Dedupe by connection_id. OPPO/MIUI's WorkManager can cancel in-flight OneSignal
+    // workers, which causes OneSignal to retry the same push. Without this, the same
+    // call rings 3-4 times. Also used to suppress retry rings after the user ends a call.
+    private static final java.util.concurrent.ConcurrentHashMap<String, Long> processedCalls =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    private static final long DEDUPE_WINDOW_MS = 600000L; // 10 min
 
     private Vibrator vibrator = null;
     private Context context;
@@ -61,7 +67,41 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
 
         try {
             if (data.getString("type").equals("video_stream")) {
-                if (data.has("event") && (data.getString("event").equals("answered") || data.getString("event").equals("ended"))) {
+                boolean isControlEvent = data.has("event")
+                        && (data.getString("event").equals("answered")
+                            || data.getString("event").equals("ended"));
+
+                // Dedupe: cleanup stale entries, then check this push against processed set.
+                String connId = data.optString("connection_id", "");
+                long nowMs = System.currentTimeMillis();
+                processedCalls.entrySet().removeIf(
+                        e -> nowMs - e.getValue() > DEDUPE_WINDOW_MS);
+
+                // For RING pushes: if we've already processed this connection_id (or the call
+                // was ended/answered), drop it. This blocks WorkManager-retry phantom rings.
+                if (!isControlEvent && !connId.isEmpty()
+                        && processedCalls.containsKey(connId)) {
+                    Log.w("QRNotifDebug", "duplicate ring connId=" + connId
+                            + " (already processed " + (nowMs - processedCalls.get(connId))
+                            + "ms ago), dropping");
+                    notificationReceivedEvent.preventDefault();
+                    notificationReceivedEvent.preventDefault(true);
+                    return;
+                }
+
+                // Drop stale ring pushes (queued deliveries from when app was offline).
+                if (!isControlEvent && data.has("start_time")) {
+                    long startTime = data.getLong("start_time");
+                    long age = nowMs - startTime;
+                    if (age > 60000) {
+                        Log.w("QRNotifDebug", "ignoring stale video_stream push, age="
+                                + age + "ms notif_id=" + data.optInt("notif_id"));
+                        notificationReceivedEvent.preventDefault();
+                        notificationReceivedEvent.preventDefault(true);
+                        return;
+                    }
+                }
+                if (isControlEvent) {
                     NotificationManager notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
                     if (data.has("notif_id")) {
                         notificationManager.cancel(data.getInt("notif_id"));
@@ -79,11 +119,15 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
                             mNotification.flags |= Notification.FLAG_INSISTENT;
                         }
 //                        notificationManager.notify((int) (System.currentTimeMillis() & 0xfffffff) + 22, mNotification);
-                        // notificationReceivedEvent.complete(notification);
                     }
-                    else {
-//                        notificationReceivedEvent.complete(null);
+                    // Mark this call as ended so any WorkManager-retry ring for the same
+                    // connection_id gets dropped by the dedupe check above.
+                    if (!connId.isEmpty()) {
+                        processedCalls.put(connId, System.currentTimeMillis());
                     }
+                    // Release OneSignal worker — control events never display a OS notification.
+                    notificationReceivedEvent.preventDefault();
+                    notificationReceivedEvent.preventDefault(true);
                 } else {
 
                     int NOTIFICATION_ID = data.getInt("notif_id");
@@ -120,62 +164,171 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
                     Intent declineMainIntent = new Intent(context, QRNotificationHandler.class);
                     declineMainIntent.putExtra("notification_id", NOTIFICATION_ID);
 
-                    PendingIntent declineIntent = PendingIntent.getBroadcast(context, NOTIFICATION_ID, declineMainIntent,
+                    final PendingIntent declineIntent = PendingIntent.getBroadcast(context, NOTIFICATION_ID, declineMainIntent,
                             PendingIntent.FLAG_MUTABLE);
-                    PendingIntent answerIntent = PendingIntent.getActivity(context, NOTIFICATION_ID - 20, answerMainIntent, PendingIntent.FLAG_MUTABLE);
-//                PendingIntent answerIntent = PendingIntent.getBroadcast(context, 0, answerMainIntent, PendingIntent.FLAG_MUTABLE);
-                    PendingIntent contentIntent = PendingIntent.getActivity(context, NOTIFICATION_ID - 35, contentMainIntent, PendingIntent.FLAG_IMMUTABLE);
+                    final PendingIntent answerIntent = PendingIntent.getActivity(context, NOTIFICATION_ID - 20, answerMainIntent, PendingIntent.FLAG_MUTABLE);
+                    final PendingIntent contentIntent = PendingIntent.getActivity(context, NOTIFICATION_ID - 35, contentMainIntent, PendingIntent.FLAG_IMMUTABLE);
 
+                    final NotificationManager notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
 
-                    NotificationManager notificationManager = (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-
-
-                    Notification.Builder notifBuilder = new Notification.Builder(context, "qr_video")
-//                            .setFullScreenIntent(contentIntent, true)
-                            .setContentIntent(contentIntent)
-                            .setSmallIcon(_getResource(context, "ic_launcher", "mipmap"))
-                            .setContentTitle("Incoming Call")
-                            .setContentText("Answer the call to see who")
-                            .setOngoing(true)
-                            .setCategory(NotificationCompat.CATEGORY_CALL)
-                            .setTimeoutAfter(45000)
-                            .setAutoCancel(true)
-                            .setVisibility(VISIBILITY_PUBLIC)
-                            .addPerson(incomingCaller);
-
-
-//                PendingIntent askUserIntent = askUserIntent(context, topicName, 0, false);
-                    // Set notification content intent to take user to fullscreen UI if user taps on the
-                    // notification body.
-//                builder.setContentIntent(askUserIntent);
-//                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-//                    notifBuilder.setStyle(
-//                            Notification.CallStyle.forIncomingCall(incomingCaller, declineIntent, answerIntent));
-//                } else {
-                    notifBuilder.addAction(android.R.drawable.sym_call_missed, "Decline", declineIntent);
-                    notifBuilder.addAction(android.R.drawable.sym_action_call, "Answer", answerIntent);
-//                }
-                    Notification newNotification = notifBuilder.build();
-                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                        newNotification.flags |= Notification.FLAG_INSISTENT;
+                    // Create a new high-priority channel with bypassDnd=true. The original
+                    // qr_video channel was created without bypassDnd, and channel settings are
+                    // immutable after creation. bypassDnd is one of the three escape hatches
+                    // from AOSP's "recently noisy" cooldown (alongside isCall and CallStyle).
+                    final String CALL_CHANNEL_ID = "qr_video_v2";
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        if (notificationManager.getNotificationChannel(CALL_CHANNEL_ID) == null) {
+                            NotificationChannel callCh = new NotificationChannel(
+                                    CALL_CHANNEL_ID, "Incoming Video Call",
+                                    NotificationManager.IMPORTANCE_HIGH);
+                            callCh.setDescription("QR Video Call Alert");
+                            callCh.setBypassDnd(true);
+                            callCh.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+                            AudioAttributes callAudioAttrs = new AudioAttributes.Builder()
+                                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                                    .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                                    .build();
+                            callCh.setSound(
+                                    Uri.parse("android.resource://" + context.getPackageName() + "/raw/longbell"),
+                                    callAudioAttrs);
+                            callCh.enableVibration(true);
+                            callCh.enableLights(true);
+                            notificationManager.createNotificationChannel(callCh);
+                        }
                     }
 
-                    Timer t = new Timer();
-                    t.schedule(new TimerTask() {
-                        @Override
-                        public void run() {
-                            notificationManager.cancel(notification.getAndroidNotificationId());
-                            Timer t1 = new Timer();
-                            t1.schedule(new TimerTask() {
-                                @Override
-                                public void run() {
-                                    notificationManager.notify(NOTIFICATION_ID, newNotification);
-                                    t1.cancel();
+                    final String DBG_TAG = "QRNotifDebug";
+                    final long dbg_t0 = System.currentTimeMillis();
+                    final int dbg_osId = notification.getAndroidNotificationId();
+                    Log.d(DBG_TAG, "---- incoming qr_video push ----");
+                    Log.d(DBG_TAG, "device=" + Build.MANUFACTURER + "/" + Build.BRAND + "/" + Build.MODEL
+                            + " sdk=" + Build.VERSION.SDK_INT + " osId=" + dbg_osId + " ourId=" + NOTIFICATION_ID);
+
+                    // Clear any pre-existing noise from OneSignal restore / fcm fallback / stray qr_video
+                    // notifications before OneSignal posts the new one. These are what trigger
+                    // NotifAttentionHelper's "Muting recently noisy" and swallow our sound.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        try {
+                            android.service.notification.StatusBarNotification[] active =
+                                    notificationManager.getActiveNotifications();
+                            for (android.service.notification.StatusBarNotification sbn : active) {
+                                String ch = sbn.getNotification().getChannelId();
+                                if ("restored_OS_notifications".equals(ch)
+                                        || "fcm_fallback_notification_channel".equals(ch)
+                                        || ("qr_video".equals(ch) && sbn.getId() != dbg_osId)) {
+                                    Log.d(DBG_TAG, "clearing stale id=" + sbn.getId() + " channel=" + ch);
+                                    notificationManager.cancel(sbn.getId());
                                 }
-                            },100);
-                            t.cancel();
+                            }
+                        } catch (Exception e) {
+                            Log.e(DBG_TAG, "stale cleanup failed: " + e);
                         }
-                    }, 250);
+                    }
+
+                    // Mark call as processed so WorkManager-retry deliveries of the same push
+                    // get dropped by the dedupe check above.
+                    if (!connId.isEmpty()) {
+                        processedCalls.put(connId, System.currentTimeMillis());
+                    }
+
+                    // Prevent OneSignal from posting its own notification — we post ours with
+                    // Notification.CallStyle which AOSP's NotificationAttentionHelper exempts from
+                    // the "Muting recently noisy" anti-spam rule.
+                    // Calling preventDefault then preventDefault(true) wakes OneSignal's
+                    // displayWaiter with false, releasing the worker immediately instead of
+                    // blocking for the 30s timeout (which delays and duplicates subsequent pushes).
+                    notificationReceivedEvent.preventDefault();
+                    notificationReceivedEvent.preventDefault(true);
+
+                    Notification.Builder notifBuilder;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        // API 31+: use framework CallStyle — bypasses recently-noisy mute.
+                        notifBuilder = new Notification.Builder(context, CALL_CHANNEL_ID)
+                                .setSmallIcon(_getResource(context, "ic_launcher", "mipmap"))
+                                .setContentIntent(contentIntent)
+                                .setFullScreenIntent(contentIntent, true)
+                                .setCategory(Notification.CATEGORY_CALL)
+                                .setOngoing(true)
+                                .setTimeoutAfter(45000)
+                                .setAutoCancel(true)
+                                .setVisibility(VISIBILITY_PUBLIC)
+                                .setStyle(Notification.CallStyle.forIncomingCall(
+                                        incomingCaller, declineIntent, answerIntent));
+                        Log.d(DBG_TAG, "built CallStyle notification at t="
+                                + (System.currentTimeMillis() - dbg_t0) + "ms");
+                    } else {
+                        // API 28-30 fallback: no CallStyle available, best-effort.
+                        notifBuilder = new Notification.Builder(context, CALL_CHANNEL_ID)
+                                .setContentIntent(contentIntent)
+                                .setSmallIcon(_getResource(context, "ic_launcher", "mipmap"))
+                                .setContentTitle("Incoming Call")
+                                .setContentText("Answer the call to see who")
+                                .setOngoing(true)
+                                .setCategory(Notification.CATEGORY_CALL)
+                                .setTimeoutAfter(45000)
+                                .setAutoCancel(true)
+                                .setVisibility(VISIBILITY_PUBLIC)
+                                .addPerson(incomingCaller)
+                                .addAction(android.R.drawable.sym_call_missed, "Decline", declineIntent)
+                                .addAction(android.R.drawable.sym_action_call, "Answer", answerIntent);
+                    }
+
+                    Notification callNotification = notifBuilder.build();
+                    notificationManager.notify(NOTIFICATION_ID, callNotification);
+                    Log.d(DBG_TAG, "posted ourId=" + NOTIFICATION_ID + " at t="
+                            + (System.currentTimeMillis() - dbg_t0) + "ms");
+
+                    // Verify channel config once (cheap, helps catch regressions).
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        try {
+                            NotificationChannel dbg_ch = notificationManager.getNotificationChannel(CALL_CHANNEL_ID);
+                            if (dbg_ch == null) {
+                                Log.e(DBG_TAG, CALL_CHANNEL_ID + " channel NOT FOUND on this device");
+                            } else {
+                                Log.d(DBG_TAG, CALL_CHANNEL_ID + " importance=" + dbg_ch.getImportance()
+                                        + " sound=" + dbg_ch.getSound()
+                                        + " bypassDnd=" + dbg_ch.canBypassDnd());
+                            }
+                            Log.d(DBG_TAG, "interruptionFilter="
+                                    + notificationManager.getCurrentInterruptionFilter());
+                        } catch (Exception e) {
+                            Log.e(DBG_TAG, "channel check failed: " + e);
+                        }
+                    }
+
+                    // Post-check: confirm our notification made it to the shade with the right config.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        final int dbg_ourId = NOTIFICATION_ID;
+                        new android.os.Handler(android.os.Looper.getMainLooper())
+                                .postDelayed(new Runnable() {
+                                    @Override public void run() {
+                                        try {
+                                            boolean found = false;
+                                            for (android.service.notification.StatusBarNotification sbn
+                                                    : notificationManager.getActiveNotifications()) {
+                                                if (sbn.getId() == dbg_ourId) {
+                                                    found = true;
+                                                    String tpl = sbn.getNotification().extras != null
+                                                            ? sbn.getNotification().extras.getString(Notification.EXTRA_TEMPLATE)
+                                                            : null;
+                                                    Log.d(DBG_TAG, "POST-CHECK id=" + sbn.getId()
+                                                            + " channel=" + sbn.getNotification().getChannelId()
+                                                            + " category=" + sbn.getNotification().category
+                                                            + " sound=" + sbn.getNotification().sound
+                                                            + " template=" + tpl
+                                                            + " flags=0x" + Integer.toHexString(sbn.getNotification().flags));
+                                                }
+                                            }
+                                            if (!found) {
+                                                Log.e(DBG_TAG, "POST-CHECK: ourId=" + dbg_ourId
+                                                        + " NOT in active — OS dropped it");
+                                            }
+                                        } catch (Exception e) {
+                                            Log.e(DBG_TAG, "post-check failed: " + e);
+                                        }
+                                    }
+                                }, 800);
+                    }
 
 //                startForeground(202, newNotification);
 //                notificationReceivedEvent.complete();
@@ -184,7 +337,11 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
                 }
 
             } else {
-                // notificationReceivedEvent.complete(notification);
+                // Non-video_stream pushes (e.g. type=QR_VIDEO wake-up pings) must not display,
+                // otherwise OneSignal's default channel sound primes AttentionHelper's noisy
+                // window and mutes the real call that follows 1s later.
+                notificationReceivedEvent.preventDefault();
+                notificationReceivedEvent.preventDefault(true);
             }
         } catch (Exception ex) {
             // dont do anything
