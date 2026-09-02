@@ -336,6 +336,24 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
 //                    notificationReceivedEvent.complete(null);
                 }
 
+            } else if (!data.optString("schedule_id", "").isEmpty()
+                    || !data.optString("schedule_scene_id", "").isEmpty()) {
+                // KIOT schedule/routine reminder (carries schedule_id /
+                // schedule_scene_id). This MUST display (with its "Cancel For Once"
+                // button), so it takes priority over the wake-up-ping suppression
+                // below. Repoint the action button(s) at the misc plugin's
+                // NotificationActionReceiver so the tap runs natively without opening
+                // the app, then let OneSignal display it.
+                //
+                // WHY THIS LIVES HERE: OneSignal allows only ONE
+                // NotificationServiceExtension per app. This handler owns it (for
+                // video_stream calls), so the misc plugin can't also register one —
+                // its schedule-cancel button-rewrite is merged in here. We target
+                // NotificationActionReceiver by ComponentName (string package + class)
+                // + its action, so there is NO compile-time dependency on the misc
+                // plugin.
+                rewriteScheduleCancelButtons(notificationReceivedEvent, notification, data);
+                notificationReceivedEvent.complete(notification);
             } else {
                 // Non-video_stream pushes (e.g. type=QR_VIDEO wake-up pings) must not display,
                 // otherwise OneSignal's default channel sound primes AttentionHelper's noisy
@@ -349,6 +367,88 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
 //            notificationReceivedEvent.complete(notification);
         }
 
+    }
+
+    // ── Schedule "Cancel For Once" (merged from misc's KiotNotificationExtension) ──
+
+    // Mirrors com.kiot.misc.notifications.NotificationActionReceiver (referenced by
+    // ComponentName/action, not by class, to avoid a cross-plugin dependency).
+    private static final String KIOT_ACTION_RECEIVER_CLASS =
+            "com.kiot.misc.notifications.NotificationActionReceiver";
+    private static final String KIOT_ACTION_BUTTON_TAP = "io.kiot.notification.ACTION_BUTTON_TAP";
+    private static final String KIOT_EXTRA_ACTION_ID        = "kiot_action_id";
+    private static final String KIOT_EXTRA_SCHEDULE_ID      = "kiot_schedule_id";
+    private static final String KIOT_EXTRA_SCENE_ID         = "kiot_schedule_scene_id";
+    private static final String KIOT_EXTRA_NOTIFICATION_ID  = "kiot_notification_id";
+    private static final String KIOT_EXTRA_ANDROID_NOTIF_ID = "kiot_android_notif_id";
+
+    private void rewriteScheduleCancelButtons(INotificationReceivedEvent event,
+                                              IDisplayableMutableNotification notification,
+                                              JSONObject data) {
+        try {
+            final String scheduleId     = data.optString("schedule_id", "");
+            final String sceneId        = data.optString("schedule_scene_id", "");
+            final String notificationId = data.optString("notification_id", "");
+
+            // Not a schedule/routine reminder → leave it completely untouched.
+            if (scheduleId.isEmpty() && sceneId.isEmpty()) {
+                return;
+            }
+
+            final java.util.List<com.onesignal.notifications.IActionButton> buttons =
+                    notification.getActionButtons();
+            if (buttons == null || buttons.isEmpty()) {
+                return;
+            }
+
+            final Context ctx = event.getContext().getApplicationContext();
+            final int androidNotifId = notification.getAndroidNotificationId();
+
+            notification.setExtender(new androidx.core.app.NotificationCompat.Extender() {
+                @Override
+                public androidx.core.app.NotificationCompat.Builder extend(
+                        androidx.core.app.NotificationCompat.Builder builder) {
+                    try {
+                        // Drop OneSignal's activity-launching actions and re-add the
+                        // same buttons pointed at the misc plugin's receiver instead.
+                        builder.clearActions();
+
+                        for (int i = 0; i < buttons.size(); i++) {
+                            com.onesignal.notifications.IActionButton button = buttons.get(i);
+                            if (button == null) continue;
+
+                            Intent intent = new Intent(KIOT_ACTION_BUTTON_TAP);
+                            intent.setComponent(new android.content.ComponentName(
+                                    ctx.getPackageName(), KIOT_ACTION_RECEIVER_CLASS));
+                            intent.putExtra(KIOT_EXTRA_ACTION_ID, button.getId());
+                            intent.putExtra(KIOT_EXTRA_SCHEDULE_ID, scheduleId);
+                            intent.putExtra(KIOT_EXTRA_SCENE_ID, sceneId);
+                            intent.putExtra(KIOT_EXTRA_NOTIFICATION_ID, notificationId);
+                            intent.putExtra(KIOT_EXTRA_ANDROID_NOTIF_ID, androidNotifId);
+
+                            // Unique per notification AND per button.
+                            int requestCode = androidNotifId * 31 + i;
+
+                            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                flags |= PendingIntent.FLAG_IMMUTABLE;
+                            }
+
+                            PendingIntent pendingIntent =
+                                    PendingIntent.getBroadcast(ctx, requestCode, intent, flags);
+
+                            // Icon 0 — Android 7+ doesn't render action button icons.
+                            builder.addAction(0, button.getText(), pendingIntent);
+                        }
+                    } catch (Throwable t) {
+                        Log.e("KiotNotifExt", "Failed to rewrite schedule action buttons", t);
+                    }
+                    return builder;
+                }
+            });
+        } catch (Throwable t) {
+            Log.e("KiotNotifExt", "rewriteScheduleCancelButtons failed", t);
+        }
     }
 
 
