@@ -40,6 +40,11 @@
          <config-file target="AndroidManifest.xml" parent="/manifest">
             <uses-permission android:name="android.permission.NFC"/>
             <uses-feature android:name="android.hardware.nfc" android:required="false"/>
+            <!-- Required so the incoming-call (doorbell) CallStyle notification can post
+                 on Android 14+ (targetSdk 34+). Without this, notify() throws
+                 "CallStyle notifications must be for a foreground service ... or use a
+                 fullScreenIntent" and the ring notification silently fails. -->
+            <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT"/>
         </config-file>
 
         <config-file target="AndroidManifest.xml" parent="/manifest/application">

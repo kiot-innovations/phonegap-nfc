@@ -353,7 +353,17 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
                 // + its action, so there is NO compile-time dependency on the misc
                 // plugin.
                 rewriteScheduleCancelButtons(notificationReceivedEvent, notification, data);
-                notificationReceivedEvent.complete(notification);
+                // OneSignal v5 has no complete() on INotificationReceivedEvent, so take
+                // control and display explicitly.
+                notificationReceivedEvent.preventDefault();
+                notification.display();
+            } else if ("WORKFLOW_TRIGGERED".equals(data.optString("type", ""))) {
+                // "Routine Cancelled" / "Schedule Cancelled" confirmations. These carry no
+                // schedule_id, so without this branch they fall into the suppression below
+                // and never display natively. Placed above it so the catch-all — and the
+                // wake-up-ping behaviour it guards — is left exactly as it was.
+                notificationReceivedEvent.preventDefault();
+                notification.display();
             } else {
                 // Non-video_stream pushes (e.g. type=QR_VIDEO wake-up pings) must not display,
                 // otherwise OneSignal's default channel sound primes AttentionHelper's noisy
