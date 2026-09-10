@@ -179,6 +179,38 @@ public class IncomingCallActivity extends AppCompatActivity {
             }
         });
 
+        // Keep the Answer/Decline bar clear of the navigation / gesture area. When
+        // the call activity goes full screen on gesture-nav devices (Android 10+),
+        // the bottom gesture bar overlaps the buttons pinned to the very bottom.
+        // Apply the bottom system-bar inset as padding so the buttons always sit
+        // above it. When the nav bar is hidden (immersive) the inset is 0, so this
+        // is a no-op then. Framework WindowInsets (API 20+) — no androidx dependency.
+        int controlsId = _getResource(getApplicationContext(), "fullscreen_content_controls", "id");
+        final View controlsBar = findViewById(controlsId);
+        if (controlsBar != null) {
+            final int basePaddingBottom = controlsBar.getPaddingBottom();
+            controlsBar.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+                @Override
+                public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+                    int bottomInset;
+                    if (Build.VERSION.SDK_INT >= 30) {
+                        // Cover both classic 3-button nav (navigationBars) and gesture
+                        // nav (mandatorySystemGestures), whichever is larger — gesture
+                        // nav can report the bottom pill only via system gestures.
+                        int nav = insets.getInsets(WindowInsets.Type.navigationBars()).bottom;
+                        int gesture = insets.getInsets(WindowInsets.Type.mandatorySystemGestures()).bottom;
+                        bottomInset = Math.max(nav, gesture);
+                    } else {
+                        bottomInset = insets.getSystemWindowInsetBottom();
+                    }
+                    v.setPadding(v.getPaddingLeft(), v.getPaddingTop(),
+                            v.getPaddingRight(), basePaddingBottom + bottomInset);
+                    return insets;
+                }
+            });
+            controlsBar.requestApplyInsets();
+        }
+
         int webviewId = _getResource(getApplicationContext(), "webView", "id");
 
 //        webView = mContentView.findViewById(_getResource(getApplicationContext(), "webView", "id"));
