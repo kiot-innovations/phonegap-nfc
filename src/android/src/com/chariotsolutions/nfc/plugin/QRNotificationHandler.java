@@ -36,34 +36,35 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import com.onesignal.notifications.IActionButton;
-import com.onesignal.notifications.IDisplayableMutableNotification;
-import com.onesignal.notifications.INotificationReceivedEvent;
-import com.onesignal.notifications.INotificationServiceExtension;
 
 import com.chariotsolutions.nfc.plugin.IncomingCallActivity;
 
 import java.util.Timer;
 import java.util.TimerTask;
 
-public class QRNotificationHandler extends BroadcastReceiver implements INotificationServiceExtension{
+/**
+ * Doorbell (QR video) call notifications. Pushes arrive through kiot-cordova-plugin-misc's
+ * TwoSignalMessagingService (TwoSignal), which calls handleCallPush by name for type=video_stream.
+ * Also the receiver for the call notification's Decline action.
+ */
+public class QRNotificationHandler extends BroadcastReceiver {
 
-    // Dedupe by connection_id. OPPO/MIUI's WorkManager can cancel in-flight OneSignal
-    // workers, which causes OneSignal to retry the same push. Without this, the same
-    // call rings 3-4 times. Also used to suppress retry rings after the user ends a call.
+    // Dedupe by connection_id: a redelivered push must not ring the same call again, and
+    // late ring pushes must not re-ring a call the user already ended.
     private static final java.util.concurrent.ConcurrentHashMap<String, Long> processedCalls =
             new java.util.concurrent.ConcurrentHashMap<>();
     private static final long DEDUPE_WINDOW_MS = 600000L; // 10 min
 
     private Vibrator vibrator = null;
     private Context context;
-    @Override
-    public void onNotificationReceived(INotificationReceivedEvent notificationReceivedEvent) {
-        context = notificationReceivedEvent.getContext();
-        IDisplayableMutableNotification notification = notificationReceivedEvent.getNotification();
+    /** Entry point for TwoSignalMessagingService in kiot-cordova-plugin-misc (looked up by name). */
+    public static void handleCallPush(Context context, JSONObject data) {
+        new QRNotificationHandler().onCallPush(context, data);
+    }
 
-        JSONObject data = notification.getAdditionalData();
-        Log.i("OneSignalExample", "Received Notification Data: " + data);
+    private void onCallPush(Context ctx, JSONObject data) {
+        context = ctx;
+        Log.i("QRNotifDebug", "Received call push: " + data);
 
         try {
             if (data.getString("type").equals("video_stream")) {
@@ -84,8 +85,6 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
                     Log.w("QRNotifDebug", "duplicate ring connId=" + connId
                             + " (already processed " + (nowMs - processedCalls.get(connId))
                             + "ms ago), dropping");
-                    notificationReceivedEvent.preventDefault();
-                    notificationReceivedEvent.preventDefault(true);
                     return;
                 }
 
@@ -96,8 +95,6 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
                     if (age > 60000) {
                         Log.w("QRNotifDebug", "ignoring stale video_stream push, age="
                                 + age + "ms notif_id=" + data.optInt("notif_id"));
-                        notificationReceivedEvent.preventDefault();
-                        notificationReceivedEvent.preventDefault(true);
                         return;
                     }
                 }
@@ -125,9 +122,6 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
                     if (!connId.isEmpty()) {
                         processedCalls.put(connId, System.currentTimeMillis());
                     }
-                    // Release OneSignal worker — control events never display a OS notification.
-                    notificationReceivedEvent.preventDefault();
-                    notificationReceivedEvent.preventDefault(true);
                 } else {
 
                     int NOTIFICATION_ID = data.getInt("notif_id");
@@ -199,13 +193,13 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
 
                     final String DBG_TAG = "QRNotifDebug";
                     final long dbg_t0 = System.currentTimeMillis();
-                    final int dbg_osId = notification.getAndroidNotificationId();
+                    final int dbg_osId = -1; // nothing is posted for us any more; all stale qr_video entries go
                     Log.d(DBG_TAG, "---- incoming qr_video push ----");
                     Log.d(DBG_TAG, "device=" + Build.MANUFACTURER + "/" + Build.BRAND + "/" + Build.MODEL
                             + " sdk=" + Build.VERSION.SDK_INT + " osId=" + dbg_osId + " ourId=" + NOTIFICATION_ID);
 
-                    // Clear any pre-existing noise from OneSignal restore / fcm fallback / stray qr_video
-                    // notifications before OneSignal posts the new one. These are what trigger
+                    // Clear any pre-existing noise (restored / fcm fallback / stray qr_video)
+                    // notifications before posting the new one. These are what trigger
                     // NotifAttentionHelper's "Muting recently noisy" and swallow our sound.
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         try {
@@ -231,14 +225,6 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
                         processedCalls.put(connId, System.currentTimeMillis());
                     }
 
-                    // Prevent OneSignal from posting its own notification — we post ours with
-                    // Notification.CallStyle which AOSP's NotificationAttentionHelper exempts from
-                    // the "Muting recently noisy" anti-spam rule.
-                    // Calling preventDefault then preventDefault(true) wakes OneSignal's
-                    // displayWaiter with false, releasing the worker immediately instead of
-                    // blocking for the 30s timeout (which delays and duplicates subsequent pushes).
-                    notificationReceivedEvent.preventDefault();
-                    notificationReceivedEvent.preventDefault(true);
 
                     Notification.Builder notifBuilder;
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -336,40 +322,6 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
 //                    notificationReceivedEvent.complete(null);
                 }
 
-            } else if (!data.optString("schedule_id", "").isEmpty()
-                    || !data.optString("schedule_scene_id", "").isEmpty()) {
-                // KIOT schedule/routine reminder (carries schedule_id /
-                // schedule_scene_id). This MUST display (with its "Cancel For Once"
-                // button), so it takes priority over the wake-up-ping suppression
-                // below. Repoint the action button(s) at the misc plugin's
-                // NotificationActionReceiver so the tap runs natively without opening
-                // the app, then let OneSignal display it.
-                //
-                // WHY THIS LIVES HERE: OneSignal allows only ONE
-                // NotificationServiceExtension per app. This handler owns it (for
-                // video_stream calls), so the misc plugin can't also register one —
-                // its schedule-cancel button-rewrite is merged in here. We target
-                // NotificationActionReceiver by ComponentName (string package + class)
-                // + its action, so there is NO compile-time dependency on the misc
-                // plugin.
-                rewriteScheduleCancelButtons(notificationReceivedEvent, notification, data);
-                // OneSignal v5 has no complete() on INotificationReceivedEvent, so take
-                // control and display explicitly.
-                notificationReceivedEvent.preventDefault();
-                notification.display();
-            } else if ("WORKFLOW_TRIGGERED".equals(data.optString("type", ""))) {
-                // "Routine Cancelled" / "Schedule Cancelled" confirmations. These carry no
-                // schedule_id, so without this branch they fall into the suppression below
-                // and never display natively. Placed above it so the catch-all — and the
-                // wake-up-ping behaviour it guards — is left exactly as it was.
-                notificationReceivedEvent.preventDefault();
-                notification.display();
-            } else {
-                // Non-video_stream pushes (e.g. type=QR_VIDEO wake-up pings) must not display,
-                // otherwise OneSignal's default channel sound primes AttentionHelper's noisy
-                // window and mutes the real call that follows 1s later.
-                notificationReceivedEvent.preventDefault();
-                notificationReceivedEvent.preventDefault(true);
             }
         } catch (Exception ex) {
             // dont do anything
@@ -378,89 +330,6 @@ public class QRNotificationHandler extends BroadcastReceiver implements INotific
         }
 
     }
-
-    // ── Schedule "Cancel For Once" (merged from misc's KiotNotificationExtension) ──
-
-    // Mirrors com.kiot.misc.notifications.NotificationActionReceiver (referenced by
-    // ComponentName/action, not by class, to avoid a cross-plugin dependency).
-    private static final String KIOT_ACTION_RECEIVER_CLASS =
-            "com.kiot.misc.notifications.NotificationActionReceiver";
-    private static final String KIOT_ACTION_BUTTON_TAP = "io.kiot.notification.ACTION_BUTTON_TAP";
-    private static final String KIOT_EXTRA_ACTION_ID        = "kiot_action_id";
-    private static final String KIOT_EXTRA_SCHEDULE_ID      = "kiot_schedule_id";
-    private static final String KIOT_EXTRA_SCENE_ID         = "kiot_schedule_scene_id";
-    private static final String KIOT_EXTRA_NOTIFICATION_ID  = "kiot_notification_id";
-    private static final String KIOT_EXTRA_ANDROID_NOTIF_ID = "kiot_android_notif_id";
-
-    private void rewriteScheduleCancelButtons(INotificationReceivedEvent event,
-                                              IDisplayableMutableNotification notification,
-                                              JSONObject data) {
-        try {
-            final String scheduleId     = data.optString("schedule_id", "");
-            final String sceneId        = data.optString("schedule_scene_id", "");
-            final String notificationId = data.optString("notification_id", "");
-
-            // Not a schedule/routine reminder → leave it completely untouched.
-            if (scheduleId.isEmpty() && sceneId.isEmpty()) {
-                return;
-            }
-
-            final java.util.List<com.onesignal.notifications.IActionButton> buttons =
-                    notification.getActionButtons();
-            if (buttons == null || buttons.isEmpty()) {
-                return;
-            }
-
-            final Context ctx = event.getContext().getApplicationContext();
-            final int androidNotifId = notification.getAndroidNotificationId();
-
-            notification.setExtender(new androidx.core.app.NotificationCompat.Extender() {
-                @Override
-                public androidx.core.app.NotificationCompat.Builder extend(
-                        androidx.core.app.NotificationCompat.Builder builder) {
-                    try {
-                        // Drop OneSignal's activity-launching actions and re-add the
-                        // same buttons pointed at the misc plugin's receiver instead.
-                        builder.clearActions();
-
-                        for (int i = 0; i < buttons.size(); i++) {
-                            com.onesignal.notifications.IActionButton button = buttons.get(i);
-                            if (button == null) continue;
-
-                            Intent intent = new Intent(KIOT_ACTION_BUTTON_TAP);
-                            intent.setComponent(new android.content.ComponentName(
-                                    ctx.getPackageName(), KIOT_ACTION_RECEIVER_CLASS));
-                            intent.putExtra(KIOT_EXTRA_ACTION_ID, button.getId());
-                            intent.putExtra(KIOT_EXTRA_SCHEDULE_ID, scheduleId);
-                            intent.putExtra(KIOT_EXTRA_SCENE_ID, sceneId);
-                            intent.putExtra(KIOT_EXTRA_NOTIFICATION_ID, notificationId);
-                            intent.putExtra(KIOT_EXTRA_ANDROID_NOTIF_ID, androidNotifId);
-
-                            // Unique per notification AND per button.
-                            int requestCode = androidNotifId * 31 + i;
-
-                            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                                flags |= PendingIntent.FLAG_IMMUTABLE;
-                            }
-
-                            PendingIntent pendingIntent =
-                                    PendingIntent.getBroadcast(ctx, requestCode, intent, flags);
-
-                            // Icon 0 — Android 7+ doesn't render action button icons.
-                            builder.addAction(0, button.getText(), pendingIntent);
-                        }
-                    } catch (Throwable t) {
-                        Log.e("KiotNotifExt", "Failed to rewrite schedule action buttons", t);
-                    }
-                    return builder;
-                }
-            });
-        } catch (Throwable t) {
-            Log.e("KiotNotifExt", "rewriteScheduleCancelButtons failed", t);
-        }
-    }
-
 
     private int _getResource(Context ctx, String name, String type) {
         String package_name = ctx.getPackageName();
