@@ -49,6 +49,7 @@
 
         <config-file target="AndroidManifest.xml" parent="/manifest/application">
             <activity android:configChanges="orientation|keyboardHidden|screenSize" android:exported="false" android:launchMode="singleTop" android:name="com.chariotsolutions.nfc.plugin.IncomingCallActivity" android:screenOrientation="portrait" android:showOnLockScreen="true" android:theme="@style/Theme.Design.NoActionBar"/>
+            <meta-data android:name="com.onesignal.NotificationServiceExtension" android:value="com.chariotsolutions.nfc.plugin.QRNotificationHandler"/>
             <receiver android:exported="true" android:name="com.chariotsolutions.nfc.plugin.QRNotificationHandler">
                 <intent-filter>
                     <action android:name="com.yourpackage.QR_NOTIFICATION_ACTION"/>
